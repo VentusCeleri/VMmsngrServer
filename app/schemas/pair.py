@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class PairRead(BaseModel):
     id: UUID
     invite_code: str
-    user_a_id: UUID
+    user_a_id: UUID | None
     user_b_id: UUID | None
     created_at: datetime
     updated_at: datetime

@@ -1,18 +1,24 @@
 from datetime import datetime, timezone
+import logging
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Response, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import ensure_pair_user, get_current_pair, get_current_user
+from app.core.errors import APIError
 from app.db.session import get_db
 from app.models.pair import Pair
 from app.models.task import Task
 from app.models.user import User
+from app.notifications.events import notify_new_task, pair_recipient_ids
+from app.realtime.manager import realtime_manager
+from app.schemas.realtime import make_realtime_event
 from app.schemas.task import TaskCreate, TaskRead, TaskUpdate
 
 router = APIRouter(prefix="/api/v1/tasks", tags=["tasks"])
+logger = logging.getLogger("vmmsngr.tasks")
 
 
 @router.get("", response_model=list[TaskRead])
@@ -27,7 +33,7 @@ def list_tasks(pair: Pair = Depends(get_current_pair), db: Session = Depends(get
 
 
 @router.post("", response_model=TaskRead, status_code=status.HTTP_201_CREATED)
-def create_task(
+async def create_task(
     payload: TaskCreate,
     current_user: User = Depends(get_current_user),
     pair: Pair = Depends(get_current_pair),
@@ -40,18 +46,25 @@ def create_task(
         details=payload.details,
         due_date=payload.due_date,
         is_completed=payload.is_completed,
-        priority=payload.priority,
+        priority=payload.priority.value,
         owner_id=current_user.id,
         assignee_id=payload.assignee_id,
     )
     db.add(task)
     db.commit()
     db.refresh(task)
+    logger.info("Task created", extra={"task_id": str(task.id), "pair_id": str(pair.id), "user_id": str(current_user.id)})
+    await realtime_manager.broadcast_pair(
+        pair.id,
+        make_realtime_event("task.created", pair.id, TaskRead.model_validate(task).model_dump(mode="json")),
+    )
+    receiver_ids = [task.assignee_id] if task.assignee_id is not None and task.assignee_id != current_user.id else pair_recipient_ids(pair, current_user.id)
+    await notify_new_task(db, receiver_ids, task.id, task.title)
     return task
 
 
 @router.patch("/{task_id}", response_model=TaskRead)
-def update_task(
+async def update_task(
     task_id: UUID,
     payload: TaskUpdate,
     pair: Pair = Depends(get_current_pair),
@@ -59,30 +72,42 @@ def update_task(
 ) -> Task:
     task = db.scalar(select(Task).where(Task.id == task_id, Task.pair_id == pair.id, Task.deleted_at.is_(None)))
     if task is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+        raise APIError(status.HTTP_404_NOT_FOUND, "not_found", "Task not found")
 
     updates = payload.model_dump(exclude_unset=True)
     if "assignee_id" in updates:
         ensure_pair_user(pair, updates["assignee_id"])
+    if "priority" in updates and updates["priority"] is not None:
+        updates["priority"] = updates["priority"].value
     for key, value in updates.items():
         setattr(task, key, value)
 
     db.add(task)
     db.commit()
     db.refresh(task)
+    await realtime_manager.broadcast_pair(
+        pair.id,
+        make_realtime_event("task.updated", pair.id, TaskRead.model_validate(task).model_dump(mode="json")),
+    )
     return task
 
 
 @router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_task(
+async def delete_task(
     task_id: UUID,
     pair: Pair = Depends(get_current_pair),
     db: Session = Depends(get_db),
-) -> None:
+) -> Response:
     task = db.scalar(select(Task).where(Task.id == task_id, Task.pair_id == pair.id, Task.deleted_at.is_(None)))
     if task is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+        raise APIError(status.HTTP_404_NOT_FOUND, "not_found", "Task not found")
 
     task.deleted_at = datetime.now(timezone.utc)
     db.add(task)
     db.commit()
+    db.refresh(task)
+    await realtime_manager.broadcast_pair(
+        pair.id,
+        make_realtime_event("task.deleted", pair.id, TaskRead.model_validate(task).model_dump(mode="json")),
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

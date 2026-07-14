@@ -1,12 +1,17 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
+import logging
+
 import jwt
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
+from app.core.config import settings
+from app.core.errors import APIError
+from app.core.rate_limit import rate_limit
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
 from app.db.session import get_db
 from app.models.refresh_token import RefreshToken
@@ -15,6 +20,7 @@ from app.schemas.auth import AuthResponse, LoginRequest, LogoutRequest, RefreshR
 from app.schemas.user import UserRead
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
+logger = logging.getLogger("vmmsngr.auth")
 
 
 def issue_tokens(db: Session, user: User) -> TokenPair:
@@ -32,14 +38,22 @@ def issue_tokens(db: Session, user: User) -> TokenPair:
     return TokenPair(access_token=access_token, refresh_token=refresh_token)
 
 
-@router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)
+auth_rate_limit = Depends(rate_limit("auth", lambda: settings.rate_limit_auth_max_requests))
+
+
+@router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED, dependencies=[auth_rate_limit])
 def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> AuthResponse:
     existing = db.scalar(select(User).where(User.email == payload.email.lower()))
     if existing is not None:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
+        raise APIError(status.HTTP_409_CONFLICT, "email_already_exists", "Email already registered")
+
+    username_owner = db.scalar(select(User).where(User.username == payload.username))
+    if username_owner is not None:
+        raise APIError(status.HTTP_409_CONFLICT, "username_already_exists", "Username is already in use")
 
     user = User(
         email=payload.email.lower(),
+        username=payload.username,
         password_hash=hash_password(payload.password),
         display_name=payload.display_name,
     )
@@ -48,37 +62,41 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)) -> AuthRes
     db.refresh(user)
 
     tokens = issue_tokens(db, user)
+    logger.info("User created", extra={"user_id": str(user.id)})
     return AuthResponse(**tokens.model_dump(), user=UserRead.model_validate(user))
 
 
-@router.post("/login", response_model=AuthResponse)
-def login(payload: LoginRequest, db: Session = Depends(get_db)) -> AuthResponse:
+@router.post("/login", response_model=AuthResponse, dependencies=[auth_rate_limit])
+def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)) -> AuthResponse:
     user = db.scalar(select(User).where(User.email == payload.email.lower()))
     if user is None or not verify_password(payload.password, user.password_hash):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
+        logger.info("Auth failure", extra={"client": request.client.host if request.client else "unknown"})
+        raise APIError(status.HTTP_401_UNAUTHORIZED, "invalid_credentials", "Invalid email or password")
 
     tokens = issue_tokens(db, user)
+    logger.info("User logged in", extra={"user_id": str(user.id), "client": request.client.host if request.client else "unknown"})
     return AuthResponse(**tokens.model_dump(), user=UserRead.model_validate(user))
 
 
-@router.post("/refresh", response_model=TokenPair)
+@router.post("/refresh", response_model=TokenPair, dependencies=[auth_rate_limit])
 def refresh(payload: RefreshRequest, db: Session = Depends(get_db)) -> TokenPair:
     try:
         decoded = decode_token(payload.refresh_token)
     except jwt.PyJWTError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token") from exc
+        logger.error("Refresh JWT decode failed")
+        raise APIError(status.HTTP_401_UNAUTHORIZED, "unauthorized", "Invalid refresh token") from exc
 
     if decoded.get("type") != "refresh" or not decoded.get("jti") or not decoded.get("sub"):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+        raise APIError(status.HTTP_401_UNAUTHORIZED, "unauthorized", "Invalid refresh token")
 
     token_row = db.scalar(select(RefreshToken).where(RefreshToken.token_id == decoded["jti"]))
     now = datetime.now(timezone.utc)
     if token_row is None or token_row.revoked_at is not None or token_row.expires_at <= now:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Refresh token is not active")
+        raise APIError(status.HTTP_401_UNAUTHORIZED, "unauthorized", "Refresh token is not active")
 
     user = db.get(User, UUID(decoded["sub"]))
     if user is None:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+        raise APIError(status.HTTP_401_UNAUTHORIZED, "unauthorized", "User not found")
 
     token_row.revoked_at = now
     db.add(token_row)
@@ -103,6 +121,7 @@ def logout(
     try:
         decoded = decode_token(payload.refresh_token)
     except jwt.PyJWTError:
+        logger.error("Logout JWT decode failed")
         return
 
     token_row = db.scalar(

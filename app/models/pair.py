@@ -13,7 +13,7 @@ class Pair(TimestampMixin, Base):
 
     id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid4)
     invite_code: Mapped[str] = mapped_column(String(16), unique=True, index=True, nullable=False)
-    user_a_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    user_a_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     user_b_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
     user_a = relationship("User", foreign_keys=[user_a_id])

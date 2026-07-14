@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class MessageCreate(BaseModel):
-    body: str = Field(min_length=1, max_length=5000)
+    body: str = Field(min_length=1, max_length=4000)
     receiver_id: UUID | None = None
 
 

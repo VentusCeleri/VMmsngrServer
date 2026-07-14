@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -18,7 +18,7 @@ class Task(TimestampMixin, Base):
     details: Mapped[str | None] = mapped_column(Text, nullable=True)
     due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     is_completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    priority: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    priority: Mapped[str] = mapped_column(String(32), default="normal", nullable=False)
     owner_id: Mapped[UUID] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     assignee_id: Mapped[UUID | None] = mapped_column(PgUUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
