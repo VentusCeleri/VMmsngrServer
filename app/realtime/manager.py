@@ -96,6 +96,14 @@ class RealtimeConnectionManager:
             await self._close_socket(websocket, code)
             await self.disconnect(websocket)
 
+    async def close_all(self, code: int = 1001) -> None:
+        async with self._lock:
+            connections = list(self._connection_info.keys())
+
+        for websocket in connections:
+            await self._close_socket(websocket, code)
+            await self.disconnect(websocket)
+
     async def _close_socket(self, websocket: WebSocket, code: int) -> None:
         try:
             if websocket.client_state == WebSocketState.CONNECTED:

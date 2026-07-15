@@ -1,7 +1,12 @@
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ProductionConfigurationError(ValueError):
+    pass
 
 
 class Settings(BaseSettings):
@@ -12,6 +17,9 @@ class Settings(BaseSettings):
     allowed_hosts: str = "*"
 
     database_url: str = "postgresql+psycopg2://vmmsngr:vmmsngr@localhost:5432/vmmsngr"
+    postgres_db: str = "vmmsngr"
+    postgres_user: str = "vmmsngr"
+    postgres_password: str = "vmmsngr"
 
     jwt_secret_key: str = Field(default="change-me-in-local-env")
     jwt_algorithm: str = "HS256"
@@ -37,11 +45,22 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_production_secrets(self) -> "Settings":
         if self.environment.lower() == "production":
-            weak_secrets = {"change-me-in-local-env", "change-me", "secret", "dev-secret"}
-            if self.jwt_secret_key in weak_secrets or len(self.jwt_secret_key) < 32:
-                raise ValueError("JWT_SECRET_KEY must be strong and non-default in production")
+            weak_secrets = {"", "change-me-in-local-env", "change-me", "secret", "dev-secret", "test", "vmmsngr"}
+            weak_passwords = {"", "vmmsngr", "postgres", "password", "change-me", "secret", "test"}
             if self.debug:
-                raise ValueError("DEBUG must be false in production")
+                raise ProductionConfigurationError("DEBUG must be false when ENVIRONMENT=production")
+            if self.jwt_secret_key in weak_secrets or len(self.jwt_secret_key) < 32:
+                raise ProductionConfigurationError("JWT_SECRET_KEY must be at least 32 characters and non-default in production")
+            if self.postgres_password in weak_passwords or len(self.postgres_password) < 24:
+                raise ProductionConfigurationError("POSTGRES_PASSWORD must be strong and non-default in production")
+
+            parsed_database_url = urlparse(self.database_url)
+            if parsed_database_url.hostname in {"localhost", "127.0.0.1", "::1"}:
+                raise ProductionConfigurationError("DATABASE_URL must not use localhost inside production Docker")
+            if not self.database_url:
+                raise ProductionConfigurationError("DATABASE_URL is required in production")
+            if self.allowed_host_list == ["*"]:
+                raise ProductionConfigurationError("ALLOWED_HOSTS must be explicit in production")
         return self
 
     @property

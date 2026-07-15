@@ -1,4 +1,8 @@
+.git
+.gitignore
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.py[cod]
@@ -8,3 +12,9 @@ __pycache__/
 htmlcov/
 .coverage
 backups/
+*.sql
+*.sql.gz
+*.dump
+*.p8
+*.log
+.DS_Store

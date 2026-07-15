@@ -1,24 +1,44 @@
-# Production Readiness Notes
+# Production Readiness
 
-v1.4 prepares VMmsngrServer for a future VPS deployment, but does not deploy production infrastructure yet.
+v1.5 prepares VMmsngrServer for safer VPS operation behind Nginx and HTTPS. It does not perform the VPS changes automatically.
+
+## Current Production Baseline
+
+- FastAPI runs in Docker.
+- PostgreSQL runs in Docker.
+- Nginx should be the only public HTTP(S) entrypoint.
+- PostgreSQL must not be exposed to the internet.
+- API port `8000` must be bound only to `127.0.0.1` in production.
+- WebSocket, Presence and APNs remain single-process features.
 
 ## Configuration
 
 All runtime configuration must come from environment variables or `.env`:
 
+- `APP_NAME`
+- `ENVIRONMENT`
+- `DEBUG`
 - `DATABASE_URL`
+- `POSTGRES_DB`
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
 - `JWT_SECRET_KEY`
+- `JWT_ALGORITHM`
 - `ACCESS_TOKEN_EXPIRE_MINUTES`
 - `REFRESH_TOKEN_EXPIRE_DAYS`
 - `CORS_ORIGINS`
-- `ENVIRONMENT`
-- `DEBUG`
-- `LOG_LEVEL`
 - `ALLOWED_HOSTS`
-- rate limit settings
-- APNs settings
+- `LOG_LEVEL`
+- `RATE_LIMIT_*`
+- `APNS_*`
 
-Production refuses to start with the default weak `JWT_SECRET_KEY` or `DEBUG=true`.
+When `ENVIRONMENT=production`, startup validation rejects:
+
+- `DEBUG=true`;
+- missing, default or short `JWT_SECRET_KEY`;
+- `DATABASE_URL` pointing to `localhost`, `127.0.0.1` or `::1`;
+- missing/default/short `POSTGRES_PASSWORD`;
+- wildcard `ALLOWED_HOSTS=*`.
 
 ## Security Baseline
 
@@ -31,20 +51,48 @@ Production refuses to start with the default weak `JWT_SECRET_KEY` or `DEBUG=tru
 - Pair deletion, pair leave and account deletion run in database transactions and roll back on database errors.
 - WebSocket pair and user identity are derived from the access token.
 - Device token registration requires JWT and is scoped to current user.
-- Do not log passwords, access tokens, refresh tokens, WebSocket query strings or message bodies.
-- Do not log full APNs tokens or APNs private key paths in production logs.
+
+## Logging
+
+Production logs should include:
+
+- app startup and shutdown;
+- migration output;
+- database errors;
+- HTTP errors;
+- auth failures without sensitive values;
+- WebSocket connect/disconnect;
+- push provider errors.
+
+Production logs must not include:
+
+- passwords;
+- access tokens;
+- refresh tokens;
+- WebSocket query tokens;
+- message bodies;
+- task contents;
+- `.env` values;
+- APNs private key material.
+
+Docker log rotation is configured in `docker-compose.prod.yml` with `max-size=10m` and `max-file=5`.
+
+## Health and Readiness
+
+- `/health`: API process is alive; intentionally lightweight.
+- `/ready`: PostgreSQL is reachable and Alembic version table exists.
+
+Nginx can proxy `/health`; Docker healthcheck uses `/ready`.
+
+## Graceful Shutdown
+
+Production compose sets `stop_grace_period: 30s` for the API. FastAPI lifespan logs shutdown, closes active WebSocket connections and disposes the SQLAlchemy engine.
 
 ## Rate Limiting
 
-Current rate limiting is in-memory and single-process. It protects MVP endpoints but is not enough for a multi-process or multi-node deployment.
+Current rate limiting is in-memory and single-process. It protects MVP endpoints but is not enough for multi-process or multi-node deployment.
 
-Protected endpoint groups:
-
-- register/login/refresh;
-- pair join;
-- sending messages.
-
-Before multi-process deployment, move rate limiting to Redis or a reverse proxy.
+Before multi-process deployment, move rate limiting to Redis or the reverse proxy.
 
 ## Presence
 
@@ -71,12 +119,8 @@ Current presence is single-process because the connection manager is in-memory. 
 - `DELETE /api/v1/pairs/me` hard-deletes pair messages and tasks before deleting the pair.
 - `POST /api/v1/pairs/leave` clears the current user's pair slot and deletes the pair only if both slots are empty.
 - `DELETE /api/v1/users/me` removes refresh tokens and personal data before deleting the user.
-- Add audit logging and backup/restore review before exposing these operations beyond the family MVP.
 
-## Readiness
-
-- `/health` means the API process is alive.
-- `/ready` checks PostgreSQL and the Alembic version table.
+Create backups before production changes and before any manual destructive operation.
 
 ## Backups
 

@@ -15,31 +15,27 @@ Own Server backend for VMmsngr, a private family messenger and organizer for two
 - APNs push notification provider
 - Basic presence
 - MVP rate limiting
-- Docker Compose for local development
+- Docker Compose for local development and production VPS
 
-No production VPS deploy, AI, Redis, E2E encryption or file storage are included in v1.4.
+No AI, Redis, E2E encryption, file storage, Kubernetes or automatic GitHub deployment are included in v1.5.
 
 ## Project Structure
 
 ```text
 VMmsngrServer/
-  app/
-    api/routes/       HTTP endpoints
-    core/             config, security, error handling
-    db/               SQLAlchemy session/base
-    models/           SQLAlchemy models
-    schemas/          Pydantic request/response models
-    services/         small domain helpers
-    realtime/         in-memory WebSocket connection manager
-    main.py           FastAPI app factory
-  alembic/
-    versions/         database migrations
-  docker-compose.yml
+  app/                  FastAPI app, routes, config, models, services
+  alembic/              database migrations
+  deploy/nginx/         Nginx reverse proxy examples
+  docs/                 production, deployment and backup docs
+  scripts/              safe deploy/backup/restore helpers
+  tests/                backend contract and infrastructure tests
+  docker-compose.yml    local development
+  docker-compose.prod.yml production VPS
   Dockerfile
   requirements.txt
 ```
 
-## Local Run With Docker Compose
+## Local Development
 
 ```bash
 cd /Users/mapku3/Documents/VMmsngrServer
@@ -47,7 +43,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-The API will be available at:
+The local API is available at:
 
 - API: <http://localhost:8000>
 - Health: <http://localhost:8000/health>
@@ -55,7 +51,129 @@ The API will be available at:
 - OpenAPI docs: <http://localhost:8000/docs>
 - ReDoc: <http://localhost:8000/redoc>
 
-## Useful Commands
+Local compose intentionally keeps developer conveniences:
+
+- source mounted into `/app`;
+- Uvicorn `--reload`;
+- PostgreSQL exposed on `5432`;
+- API exposed on `8000`.
+
+## Production VPS
+
+Production uses `docker-compose.prod.yml`.
+
+Key differences:
+
+- PostgreSQL has no public port;
+- API binds only to `127.0.0.1:8000`;
+- no source-code bind mount;
+- no Uvicorn `--reload`;
+- Alembic migrations run before API startup;
+- containers restart `unless-stopped`;
+- Docker logs are rotated;
+- Nginx terminates public HTTP/HTTPS and proxies to local API.
+
+Start manually on the VPS after creating `.env`:
+
+```bash
+docker compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml ps
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ready
+```
+
+Full guide: [docs/DeploymentVPS.md](docs/DeploymentVPS.md).
+
+## Environment Variables
+
+Copy `.env.example` to `.env` and fill values.
+
+Important production values:
+
+```env
+ENVIRONMENT=production
+DEBUG=false
+APP_NAME=VMmsngrServer
+LOG_LEVEL=INFO
+ALLOWED_HOSTS=api.<domain>
+CORS_ORIGINS=https://api.<domain>
+
+POSTGRES_DB=vmmsngr
+POSTGRES_USER=vmmsngr
+POSTGRES_PASSWORD=<openssl-rand-hex-32>
+DATABASE_URL=postgresql+psycopg2://vmmsngr:<same-password>@db:5432/vmmsngr
+
+JWT_SECRET_KEY=<openssl-rand-hex-64>
+JWT_ALGORITHM=HS256
+ACCESS_TOKEN_EXPIRE_MINUTES=30
+REFRESH_TOKEN_EXPIRE_DAYS=30
+```
+
+Generate secrets:
+
+```bash
+openssl rand -hex 32
+openssl rand -hex 64
+```
+
+When `ENVIRONMENT=production`, the server refuses weak/default secrets, `DEBUG=true`, wildcard hosts and localhost database URLs.
+
+## Deployment
+
+Safe helper:
+
+```bash
+scripts/deploy_vps.sh
+```
+
+The script checks for `.env`, refuses dirty Git state, pulls with `--ff-only`, builds, applies migrations, starts production compose and waits for `/ready`. It never removes Docker volumes.
+
+Manual update:
+
+```bash
+scripts/backup_postgres.sh
+git pull --ff-only
+docker compose -f docker-compose.prod.yml build
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs --tail=100 api
+```
+
+## Backup
+
+```bash
+scripts/backup_postgres.sh
+```
+
+Backups are written to `backups/`, which is ignored by Git. Copy important backups off the VPS.
+
+## Restore
+
+```bash
+scripts/restore_postgres.sh backups/vmmsngr-postgres-YYYYMMDDTHHMMSSZ.sql.gz
+```
+
+Restore requires typing `RESTORE` and overwrites database data. Create a new backup first.
+
+More details: [docs/Backups.md](docs/Backups.md).
+
+## Troubleshooting
+
+```bash
+docker compose config
+docker compose -f docker-compose.prod.yml config
+docker compose -f docker-compose.prod.yml ps
+docker compose -f docker-compose.prod.yml logs --tail=100 api
+docker compose -f docker-compose.prod.yml logs --tail=100 db
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ready
+sudo nginx -t
+```
+
+If `/health` works but `/ready` fails, check PostgreSQL health, `DATABASE_URL`, `.env` and Alembic state.
+
+## Useful Local Commands
 
 Run migrations manually:
 
@@ -67,13 +185,6 @@ Create a new migration after model changes:
 
 ```bash
 docker compose run --rm api alembic revision --autogenerate -m "Describe change"
-```
-
-Check health:
-
-```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/ready
 ```
 
 ## API Endpoints
@@ -127,85 +238,10 @@ curl http://localhost:8000/ready
 
 - `GET /api/v1/ws?token=<access_token>`
 
-Events:
+Do not log WebSocket query tokens.
 
-- `connection.ready`
-- `message.created`
-- `task.created`
-- `task.updated`
-- `task.deleted`
-- `presence.updated`
-- `profile.updated`
-- `pair.updated`
-- `pair.deleted`
-- `user.left`
-- `error`
-- `ping`
-- `pong`
+## Production Notes
 
-## Authorization Rules
-
-- Every protected endpoint requires `Authorization: Bearer <access_token>`.
-- Users can only read their own current pair.
-- Users can leave their pair; the server clears their participant slot.
-- Users can delete their pair; the server deletes pair messages and tasks first.
-- Users can delete their account; the server revokes refresh tokens and removes personal data in one transaction.
-- Tasks are always scoped to the authenticated user's pair.
-- Messages are always scoped to the authenticated user's pair.
-- `assignee_id` and `receiver_id` must belong to the same pair when provided.
-- Task deletion is soft delete via `deleted_at`.
-- Logout revokes refresh tokens; access tokens remain valid until their normal short expiration.
-- Presence is derived from active WebSocket connections, not a persistent `online` boolean.
-- PostgreSQL stores `last_seen_at` only.
-- WebSocket events are pair-scoped.
-- Push notifications are sent only to users without an active WebSocket connection.
-- If APNs is not configured, push send is skipped with an INFO log while message/task writes continue.
-
-## APNs Configuration
-
-Set these values in `.env` only after enabling Push Notifications in Apple Developer:
-
-```env
-APNS_ENABLED=true
-APNS_ENVIRONMENT=sandbox
-APNS_TEAM_ID=
-APNS_KEY_ID=
-APNS_BUNDLE_ID=com.maxvika.VMmsngr
-APNS_PRIVATE_KEY_PATH=/absolute/path/to/AuthKey.p8
-```
-
-Do not commit `.p8` files or APNs credentials.
-
-## Profile Model
-
-`email` is used for authentication. `username` is a unique public identifier stored in lowercase. `display_name` is the human-facing name used by iOS UI.
-
-Username rules:
-
-- 3-30 chars;
-- latin letters, digits, underscore and dot;
-- unique case-insensitively by normalized lowercase value.
-
-## Production Readiness Notes
-
-- Configure all values through `.env`.
-- `ENVIRONMENT=production` refuses default or short `JWT_SECRET_KEY`.
-- Do not log passwords, access tokens, refresh tokens or WebSocket query strings.
-- Rate limiting is in-memory and single-process only.
-- Presence is in-memory and single-process only.
-- Use `docs/Backups.md` before storing important data on a VPS.
-
-## Example Flow
-
-```bash
-curl -X POST http://localhost:8000/api/v1/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"email":"a@example.com","username":"alex","password":"password123","display_name":"Alex"}'
-```
-
-Use the returned `access_token`:
-
-```bash
-curl -X POST http://localhost:8000/api/v1/pairs \
-  -H "Authorization: Bearer ACCESS_TOKEN"
-```
+- See [docs/ProductionReadiness.md](docs/ProductionReadiness.md).
+- See [docs/DeploymentVPS.md](docs/DeploymentVPS.md).
+- See [docs/Backups.md](docs/Backups.md).

@@ -1,4 +1,6 @@
 import logging
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,6 +10,21 @@ from app.api.routes import auth, devices, health, messages, pairs, tasks, users,
 from app.core.config import settings
 from app.core.errors import install_error_handlers
 from app.core.logging import configure_logging
+from app.db.session import engine
+from app.realtime.manager import realtime_manager
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    logger = logging.getLogger("vmmsngr")
+    logger.info("Application startup complete", extra={"environment": settings.environment})
+    try:
+        yield
+    finally:
+        logger.info("Application shutdown started")
+        await realtime_manager.close_all(code=1001)
+        engine.dispose()
+        logger.info("Application shutdown complete")
 
 
 def create_app() -> FastAPI:
@@ -20,6 +37,7 @@ def create_app() -> FastAPI:
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
+        lifespan=lifespan,
     )
 
     app.add_middleware(

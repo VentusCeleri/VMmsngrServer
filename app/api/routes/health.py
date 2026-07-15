@@ -1,4 +1,5 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -15,11 +16,12 @@ def health() -> HealthResponse:
 
 
 @router.get("/ready", response_model=HealthResponse)
-def ready() -> HealthResponse:
+def ready() -> HealthResponse | JSONResponse:
     try:
         with SessionLocal() as db:
             db.execute(text("select 1"))
             db.execute(text("select version_num from alembic_version limit 1"))
     except SQLAlchemyError:
-        return HealthResponse(status="not_ready", service=settings.app_name)
+        payload = HealthResponse(status="not_ready", service=settings.app_name).model_dump()
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content=payload)
     return HealthResponse(status="ready", service=settings.app_name)
